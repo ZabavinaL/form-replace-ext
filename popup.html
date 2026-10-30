@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Form Find & Replace</title>
+  </head>
+  <body>
+    <header>
+      <h1>Form Find &amp; Replace</h1>
+      <button id="addRule" class="ghost" type="button" title="Добавить правило">
+        + Правило
+      </button>
+    </header>
+
+    <p class="hint">
+      Задай пары «найти → заменить». Кнопка «Применить» подменит значения во
+      всех полях форм на текущей вкладке.
+    </p>
+
+    <div id="rules" class="rules"></div>
+
+    <div id="empty" class="empty">Правил пока нет. Добавь первое.</div>
+
+    <div id="status" class="status" role="status"></div>
+
+    <footer>
+      <button id="apply" class="primary" type="button">Применить</button>
+      <button id="clear" class="ghost" type="button">Очистить все</button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
