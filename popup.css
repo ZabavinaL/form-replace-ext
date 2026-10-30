@@ -149,6 +149,54 @@ h1 {
   color: var(--danger);
 }
 
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.result {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  color: #1a1b1f;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.result .head {
+  font-weight: 600;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+
+.result .counts {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.result .counts span {
+  background: #e3e7f0;
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+
+.result ul {
+  margin: 0;
+  padding-left: 18px;
+  word-break: break-word;
+}
+
+.result .more {
+  color: #666;
+  margin-top: 4px;
+}
+
 footer {
   display: flex;
   gap: 8px;
@@ -173,6 +221,21 @@ button {
 
 .primary:hover {
   background: #3c66e8;
+}
+
+.secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.secondary:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .ghost {

@@ -14,18 +14,23 @@
     </header>
 
     <p class="hint">
-      Задай пары «найти → заменить». Кнопка «Применить» подменит значения во
-      всех полях форм на текущей вкладке.
+      Задай пары «найти → заменить». «Найти» покажет счёт совпадений и что
+      найдено; «Заменить» применит изменения.
     </p>
 
     <div id="rules" class="rules"></div>
 
     <div id="empty" class="empty">Правил пока нет. Добавь первое.</div>
 
+    <div id="results" class="results" hidden></div>
+
     <div id="status" class="status" role="status"></div>
 
     <footer>
-      <button id="apply" class="primary" type="button">Применить</button>
+      <button id="find" class="primary" type="button">Найти</button>
+      <button id="replace" class="secondary" type="button" disabled>
+        Заменить
+      </button>
       <button id="clear" class="ghost" type="button">Очистить все</button>
     </footer>
 

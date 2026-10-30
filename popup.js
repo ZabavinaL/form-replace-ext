@@ -1,11 +1,14 @@
 const rulesEl = document.getElementById("rules");
 const emptyEl = document.getElementById("empty");
+const resultsEl = document.getElementById("results");
 const statusEl = document.getElementById("status");
 const addBtn = document.getElementById("addRule");
-const applyBtn = document.getElementById("apply");
+const findBtn = document.getElementById("find");
+const replaceBtn = document.getElementById("replace");
 const clearBtn = document.getElementById("clear");
 
 const STORAGE_KEY = "kfRules";
+const MAX_VALUE_SHOWN = 8;
 
 let rules = [];
 
@@ -17,6 +20,12 @@ async function loadRules() {
 
 async function saveRules() {
   await chrome.storage.local.set({ [STORAGE_KEY]: rules });
+}
+
+function activeRules() {
+  return rules.filter(
+    (r) => r.enabled !== false && String(r.find).trim().length > 0
+  );
 }
 
 function render() {
@@ -96,7 +105,8 @@ function render() {
     const caseLabel = document.createElement("label");
     const caseCheck = document.createElement("input");
     caseCheck.type = "checkbox";
-    caseCheck.checked = rule.caseSensitive !== false;
+    // По умолчанию регистр НЕ учитывается.
+    caseCheck.checked = rule.caseSensitive === true;
     caseCheck.addEventListener("change", () => {
       rule.caseSensitive = caseCheck.checked;
       saveRules();
@@ -116,27 +126,111 @@ function setStatus(text, kind) {
   statusEl.className = "status" + (kind ? " " + kind : "");
 }
 
-async function applyRulesToTab() {
-  const activeRules = rules.filter(
-    (r) => r.enabled !== false && String(r.find).trim().length > 0
-  );
+function modeLabel(mode) {
+  return mode === "exact" ? "полное совпадение" : "часть значения";
+}
 
-  if (!activeRules.length) {
+function renderFindResults(results) {
+  resultsEl.innerHTML = "";
+  resultsEl.hidden = false;
+
+  let total = 0;
+  results.forEach((r) => {
+    const card = document.createElement("div");
+    card.className = "result";
+
+    const head = document.createElement("div");
+    head.className = "head";
+    head.textContent = `«${r.find}» → «${r.replace}» (${modeLabel(r.mode)})`;
+    card.appendChild(head);
+
+    const counts = document.createElement("div");
+    counts.className = "counts";
+    const cs = document.createElement("span");
+    cs.textContent = `С учётом регистра: ${r.countCaseSensitive}`;
+    const ci = document.createElement("span");
+    ci.textContent = `Без учёта регистра: ${r.countCaseInsensitive}`;
+    counts.append(cs, ci);
+    card.appendChild(counts);
+
+    if (r.samples.length) {
+      const ul = document.createElement("ul");
+      r.samples.forEach((v) => {
+        const li = document.createElement("li");
+        li.textContent = v;
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      if (r.countCaseInsensitive > r.samples.length) {
+        const more = document.createElement("div");
+        more.className = "more";
+        more.textContent = `...и ещё ${r.countCaseInsensitive - r.samples.length}`;
+        card.appendChild(more);
+      }
+    }
+
+    resultsEl.appendChild(card);
+    total += r.countCaseInsensitive;
+  });
+
+  replaceBtn.disabled = false;
+  setStatus(`Найдено всего: ${total}`, "ok");
+}
+
+// Отправка сообщения в активную вкладку с повторным внедрением скрипта на лету.
+async function sendToTab(payload) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) throw new Error("Вкладка недоступна");
+
+  const trySend = () => chrome.tabs.sendMessage(tab.id, payload);
+
+  try {
+    return await trySend();
+  } catch (_err) {
+    // Страница открыта до установки/обновления расширения, content script в ней
+    // отсутствует — внедряем на лету и повторяем.
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["content.js"],
+    });
+    return await trySend();
+  }
+}
+
+async function onFind() {
+  const active = activeRules();
+  if (!active.length) {
+    resultsEl.hidden = true;
+    replaceBtn.disabled = true;
     setStatus("Нет активных правил", "err");
     return;
   }
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) {
-    setStatus("Вкладка недоступна", "err");
+  setStatus("Ищу...");
+  try {
+    const res = await sendToTab({ type: "KF_FIND", rules: active });
+    if (res && res.ok) {
+      renderFindResults(res.results);
+    } else {
+      replaceBtn.disabled = true;
+      setStatus(res && res.error ? res.error : "Не удалось найти", "err");
+    }
+  } catch (_err2) {
+    replaceBtn.disabled = true;
+    setStatus("Перезагрузи страницу и попробуй снова (нет доступа)", "err");
+  }
+}
+
+async function onReplace() {
+  const active = activeRules();
+  if (!active.length) {
+    setStatus("Нет активных правил", "err");
     return;
   }
 
   setStatus("Применяю...");
-
-  const payload = { type: "KF_REPLACE", rules: activeRules };
-  const apply = async () => {
-    const res = await chrome.tabs.sendMessage(tab.id, payload);
+  try {
+    const res = await sendToTab({ type: "KF_REPLACE", rules: active });
     if (res && res.ok) {
       setStatus(`Готово: изменено полей — ${res.changed}`, "ok");
     } else {
@@ -145,26 +239,8 @@ async function applyRulesToTab() {
         "err"
       );
     }
-  };
-
-  try {
-    await apply();
-  } catch (_err) {
-    // Страница открыта до установки/обновления расширения, и content script
-    // в ней ещё не загружен. Внедряем его на лету и повторяем применение.
-    try {
-      setStatus("Внедряю скрипт...");
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ["content.js"],
-      });
-      await apply();
-    } catch (_err2) {
-      setStatus(
-        "Перезагрузи страницу и попробуй снова (нет доступа)",
-        "err"
-      );
-    }
+  } catch (_err2) {
+    setStatus("Перезагрузи страницу и попробуй снова (нет доступа)", "err");
   }
 }
 
@@ -174,18 +250,21 @@ addBtn.addEventListener("click", () => {
     replace: "",
     mode: "part",
     enabled: true,
-    caseSensitive: true,
+    caseSensitive: false, // по умолчанию регистр не учитывается
   });
   saveRules();
   render();
 });
 
-applyBtn.addEventListener("click", applyRulesToTab);
+findBtn.addEventListener("click", onFind);
+replaceBtn.addEventListener("click", onReplace);
 
 clearBtn.addEventListener("click", async () => {
   rules = [];
   await saveRules();
   render();
+  resultsEl.hidden = true;
+  replaceBtn.disabled = true;
   setStatus("Все правила удалены");
 });
 

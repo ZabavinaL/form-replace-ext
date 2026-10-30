@@ -1,6 +1,8 @@
 /**
  * Content script для массовой подмены значений в полях форм.
- * Слушает сообщения из попапа и применяет правила на странице.
+ * Слушает сообщения из попапа:
+ *  - KF_FIND     — поиск совпадений (счёт с/без учёта регистра + найденные значения);
+ *  - KF_REPLACE  — применение правил замены.
  */
 
 // Поля-кандидаты: редактируемые input (без нередактируемых/служебных типов),
@@ -10,6 +12,37 @@ const SELECTOR =
   ':not([type=reset]):not([type=file]):not([type=checkbox])' +
   ':not([type=radio]):not([type=image]):not([type=color]):not([type=range]), ' +
   'textarea, select, [contenteditable]';
+
+const MAX_SAMPLES = 8;
+
+// Все поля основного документа и iframe того же домена.
+function collectFields() {
+  const all = [];
+  const collect = (root) => {
+    root.querySelectorAll(SELECTOR).forEach((el) => all.push(el));
+  };
+  collect(document);
+
+  document.querySelectorAll("iframe").forEach((iframe) => {
+    try {
+      const doc = iframe.contentDocument;
+      if (doc && doc !== document) collect(doc);
+    } catch (_err) {
+      // Кросс-доменный iframe — доступ закрыт, пропускаем.
+    }
+  });
+
+  return all;
+}
+
+function fieldValue(el) {
+  return el.isContentEditable ? el.innerText : el.value;
+}
+
+// Учитывать регистр по умолчанию НЕ надо: флаг вкл. только при caseSensitive === true.
+function isCaseSensitive(rule) {
+  return rule.caseSensitive === true;
+}
 
 // Экранирование спецсимволов regex для поиска как обычной строки.
 function escapeRegExp(value) {
@@ -34,11 +67,8 @@ function applyRule(el, rule) {
   const replace = String(rule.replace);
   if (!find) return false;
 
-  // Учёт регистра: true по умолчанию (флаг может отсутствовать у старых правил).
-  const caseSensitive = rule.caseSensitive !== false;
-
-  const isContentEditable = el.isContentEditable;
-  const current = isContentEditable ? el.innerText : el.value;
+  const caseSensitive = isCaseSensitive(rule);
+  const current = fieldValue(el);
   if (current == null) return false;
 
   let next = null;
@@ -61,11 +91,19 @@ function applyRule(el, rule) {
   return true;
 }
 
-function applyInDocument(doc, enabledRules) {
+function activeRules(rules) {
+  if (!Array.isArray(rules)) return [];
+  return rules.filter(
+    (r) => r.enabled !== false && String(r.find).trim().length > 0
+  );
+}
+
+function applyRules(rules) {
+  const enabled = activeRules(rules);
   let changed = 0;
 
-  doc.querySelectorAll(SELECTOR).forEach((el) => {
-    for (const rule of enabledRules) {
+  collectFields().forEach((el) => {
+    for (const rule of enabled) {
       if (applyRule(el, rule)) {
         changed++;
         // Поле уже изменено первым подходящим правилом — к следующему полю.
@@ -77,33 +115,60 @@ function applyInDocument(doc, enabledRules) {
   return changed;
 }
 
-function applyRules(rules) {
-  if (!Array.isArray(rules)) return 0;
+// Статистика по одному правилу: счёт с учётом и без учёта регистра, найденные значения.
+function matchRule(rule) {
+  const find = String(rule.find);
+  const exact = rule.mode === "exact";
+  const findUpper = find.toUpperCase();
+  let countCaseSensitive = 0;
+  let countCaseInsensitive = 0;
+  const samples = [];
+  const seen = new Set();
 
-  const enabled = rules.filter(
-    (r) => r.enabled !== false && String(r.find).trim().length > 0
-  );
+  collectFields().forEach((el) => {
+    const cur = fieldValue(el);
+    if (cur == null) return;
+    const str = String(cur);
 
-  let changed = applyInDocument(document, enabled);
+    const mCS = exact ? str === find : str.includes(find);
+    const mCI = exact
+      ? str.toUpperCase() === findUpper
+      : str.toUpperCase().includes(findUpper);
 
-  // iframe того же домена: прозрачно для пользователя, кросс-доменные
-  // пропускаются (политика безопасности браузера не позволяет к ним доступ).
-  document.querySelectorAll("iframe").forEach((iframe) => {
-    try {
-      const doc = iframe.contentDocument;
-      if (doc && doc !== document) {
-        changed += applyInDocument(doc, enabled);
-      }
-    } catch (_err) {
-      // Кросс-доменный iframe — доступ закрыт, пропускаем.
+    if (mCS) countCaseSensitive++;
+    if (mCI) countCaseInsensitive++;
+
+    if ((mCS || mCI) && samples.length < MAX_SAMPLES && !seen.has(str)) {
+      seen.add(str);
+      samples.push(str);
     }
   });
 
-  return changed;
+  return {
+    find,
+    replace: String(rule.replace),
+    mode: exact ? "exact" : "part",
+    caseSensitive: isCaseSensitive(rule),
+    countCaseSensitive,
+    countCaseInsensitive,
+    samples,
+  };
+}
+
+function findRules(rules) {
+  return activeRules(rules).map(matchRule);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.type === "KF_REPLACE") {
+  if (!msg || typeof msg.type !== "string") return false;
+
+  if (msg.type === "KF_FIND") {
+    try {
+      sendResponse({ ok: true, results: findRules(msg.rules) });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err) });
+    }
+  } else if (msg.type === "KF_REPLACE") {
     try {
       const changed = applyRules(msg.rules);
       sendResponse({ ok: true, changed });
@@ -111,5 +176,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: String(err) });
     }
   }
+
   return false;
 });
