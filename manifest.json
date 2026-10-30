@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Form Find & Replace",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Массовая подмена значений в полях форм на текущей странице по заданным правилам",
   "permissions": ["activeTab", "storage", "scripting"],
   "icons": {
