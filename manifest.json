@@ -1,12 +1,22 @@
 {
   "manifest_version": 3,
   "name": "Form Find & Replace",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Массовая подмена значений в полях форм на текущей странице по заданным правилам",
   "permissions": ["activeTab", "storage", "scripting"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Form Find & Replace"
+    "default_title": "Form Find & Replace",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   },
   "background": {
     "service_worker": "background.js"
