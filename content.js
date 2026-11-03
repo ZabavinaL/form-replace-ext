@@ -239,17 +239,117 @@ function flashField(el) {
   }, FLASH_MS);
 }
 
+// ---- Подсветка найденных слов на странице (жёлтый фон) ----
+
+const MARK_ATTR = "data-kf-mark";
+const MARK_BG = "#fff59d";
+let markSpans = [];
+let markControls = [];
+
+// Снять все подсветки, вернув исходное состояние.
+function clearMarks() {
+  markSpans.forEach((span) => {
+    const parent = span.parentNode;
+    if (parent) parent.replaceChild(span.firstChild, span);
+  });
+  markSpans = [];
+
+  markControls.forEach(({ el, prev }) => {
+    el.style.backgroundColor = prev;
+  });
+  markControls = [];
+}
+
+// Оборачивает диапазон внутри текстового узла в спаны с жёлтым фоном.
+function wrapRange(textNode, start, end) {
+  const parent = textNode.parentNode;
+  if (!parent || end <= start) return;
+
+  const before = textNode.splitText(start);
+  const mid = before.splitText(end - start);
+
+  const span = textNode.ownerDocument.createElement("span");
+  span.setAttribute(MARK_ATTR, "");
+  span.style.backgroundColor = MARK_BG;
+  parent.insertBefore(span, mid);
+  span.appendChild(mid);
+  markSpans.push(span);
+}
+
+// Отметить вхождения find внутри contenteditable (по текстовым узлам).
+function markContentEditable(el, find, caseSensitive) {
+  const re = new RegExp(escapeRegExp(find), caseSensitive ? "g" : "gi");
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  for (const node of nodes) {
+    const value = node.nodeValue;
+    if (!value) continue;
+    const ranges = [];
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(value)) !== null) {
+      ranges.push([m.index, m.index + m[0].length]);
+      if (m[0].length === 0) re.lastIndex++;
+    }
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      wrapRange(node, ranges[i][0], ranges[i][1]);
+    }
+  }
+}
+
+// Отметить поле целиком (для input/textarea/select и точного совпадения).
+function markElement(el) {
+  const prev = el.style.backgroundColor;
+  el.style.backgroundColor = MARK_BG;
+  markControls.push({ el, prev });
+}
+
+// Отметить на странице совпадения всех активных правил
+// (первое подходящее правило на поле, как при замене).
+function markMatches(rules) {
+  const enabled = activeRules(rules);
+  collectFields().forEach((el) => {
+    for (const rule of enabled) {
+      const find = String(rule.find);
+      if (!find) continue;
+      const caseSensitive = isCaseSensitive(rule);
+      const cur = fieldValue(el);
+      if (cur == null) continue;
+      const str = String(cur);
+
+      const exact = rule.mode === "exact";
+      const mCI = exact
+        ? str.toUpperCase() === find.toUpperCase()
+        : str.toUpperCase().includes(find.toUpperCase());
+      if (!mCI) continue;
+
+      if (el.isContentEditable && !exact) {
+        markContentEditable(el, find, caseSensitive);
+      } else {
+        markElement(el);
+      }
+      break;
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg.type !== "string") return false;
 
   if (msg.type === "KF_FIND") {
     try {
-      sendResponse({ ok: true, results: findRules(msg.rules) });
+      clearMarks();
+      const results = findRules(msg.rules);
+      markMatches(msg.rules);
+      sendResponse({ ok: true, results });
     } catch (err) {
       sendResponse({ ok: false, error: String(err) });
     }
   } else if (msg.type === "KF_REPLACE") {
     try {
+      clearMarks();
       const changed = applyRules(msg.rules, msg.targets);
       sendResponse({ ok: true, changed });
     } catch (err) {

@@ -132,6 +132,19 @@ function modeLabel(mode) {
   return mode === "exact" ? "полное совпадение" : "часть значения";
 }
 
+// Подгоняет регистр подстановки под регистр найденного фрагмента (как в content.js).
+function matchCase(found, replacement) {
+  if (!found || !replacement) return replacement;
+  if (found === found.toUpperCase() && /[A-Za-zА-ЯЁ]/.test(found)) {
+    return replacement.toUpperCase();
+  }
+  const first = found.charAt(0);
+  if (/[A-ZА-ЯЁ]/.test(first)) {
+    return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
 function renderFindResults(results) {
   resultsEl.innerHTML = "";
   resultsEl.hidden = false;
@@ -172,7 +185,9 @@ function renderFindResults(results) {
         const text = document.createElement("span");
         text.className = "item-text";
         text.title = "Показать на странице";
-        text.appendChild(highlightValue(v.text, v.matched));
+        const frag = highlightValue(v.text, v.matched);
+        const matchEl = frag.querySelector("b.match") || null;
+        text.appendChild(frag);
         text.addEventListener("click", () => onShowField(v.field));
 
         const btn = document.createElement("button");
@@ -180,7 +195,9 @@ function renderFindResults(results) {
         btn.className = "item-replace";
         btn.textContent = "Заменить";
         btn.title = "Заменить именно это значение";
-        btn.addEventListener("click", () => onReplaceOne(resultIndex, v.field));
+        btn.addEventListener("click", () =>
+          onReplaceOne(resultIndex, v.field, { matchEl, replace: r.replace, matched: v.matched, btn })
+        );
 
         li.append(cb, text, btn);
         ul.appendChild(li);
@@ -217,6 +234,7 @@ function highlightValue(text, matched) {
   }
   frag.appendChild(document.createTextNode(text.slice(0, idx)));
   const b = document.createElement("b");
+  b.className = "match";
   b.textContent = text.slice(idx, idx + matched.length);
   frag.appendChild(b);
   frag.appendChild(document.createTextNode(text.slice(idx + matched.length)));
@@ -243,7 +261,7 @@ async function onShowField(field) {
 }
 
 // Замена одного конкретного пункта.
-async function onReplaceOne(resultIndex, field) {
+async function onReplaceOne(resultIndex, field, data) {
   const active = activeRules();
   if (!active.length) return;
   setStatus("Применяю...");
@@ -255,7 +273,13 @@ async function onReplaceOne(resultIndex, field) {
     });
     if (res && res.ok) {
       setStatus(`Готово: заменено полей — ${res.changed}`, "ok");
-      await onFind();
+      if (data && data.matchEl && data.matchEl.parentNode) {
+        const b = document.createElement("b");
+        b.className = "replaced";
+        b.textContent = matchCase(data.matched, data.replace);
+        data.matchEl.replaceWith(b);
+      }
+      if (data && data.btn) data.btn.disabled = true;
     } else {
       setStatus(res && res.error ? res.error : "Не удалось применить", "err");
     }

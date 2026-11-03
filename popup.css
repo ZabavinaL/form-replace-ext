@@ -228,6 +228,12 @@ h1 {
   text-underline-offset: 2px;
 }
 
+.result .item-text b.replaced {
+  color: #1d9d4e;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 .result .item-replace {
   flex: none;
   font-size: 11px;
