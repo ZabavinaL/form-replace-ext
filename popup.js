@@ -11,6 +11,8 @@ const STORAGE_KEY = "kfRules";
 const MAX_VALUE_SHOWN = 8;
 
 let rules = [];
+// Плоский список найденных пунктов { els, resultIndex, field, cb } для текущих результатов.
+let selectionPlan = [];
 
 async function loadRules() {
   const data = await chrome.storage.local.get(STORAGE_KEY);
@@ -133,9 +135,10 @@ function modeLabel(mode) {
 function renderFindResults(results) {
   resultsEl.innerHTML = "";
   resultsEl.hidden = false;
+  selectionPlan = [];
 
   let total = 0;
-  results.forEach((r) => {
+  results.forEach((r, resultIndex) => {
     const card = document.createElement("div");
     card.className = "result";
 
@@ -153,18 +156,40 @@ function renderFindResults(results) {
     counts.append(cs, ci);
     card.appendChild(counts);
 
-    if (r.samples.length) {
+    if (r.items.length) {
       const ul = document.createElement("ul");
-      r.samples.forEach((v) => {
+      r.items.forEach((v) => {
         const li = document.createElement("li");
-        li.textContent = v;
+        li.className = "item-row";
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "item-check";
+        cb.title = "Отметить для замены";
+        cb.addEventListener("change", updateReplaceLabel);
+        selectionPlan.push({ cb, resultIndex, field: v.field });
+
+        const text = document.createElement("span");
+        text.className = "item-text";
+        text.title = "Показать на странице";
+        text.appendChild(highlightValue(v.text, v.matched));
+        text.addEventListener("click", () => onShowField(v.field));
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "item-replace";
+        btn.textContent = "Заменить";
+        btn.title = "Заменить именно это значение";
+        btn.addEventListener("click", () => onReplaceOne(resultIndex, v.field));
+
+        li.append(cb, text, btn);
         ul.appendChild(li);
       });
       card.appendChild(ul);
-      if (r.countCaseInsensitive > r.samples.length) {
+      if (r.countCaseInsensitive > r.items.length) {
         const more = document.createElement("div");
         more.className = "more";
-        more.textContent = `...и ещё ${r.countCaseInsensitive - r.samples.length}`;
+        more.textContent = `...и ещё ${r.countCaseInsensitive - r.items.length}`;
         card.appendChild(more);
       }
     }
@@ -174,7 +199,69 @@ function renderFindResults(results) {
   });
 
   replaceBtn.disabled = false;
+  updateReplaceLabel();
   setStatus(`Найдено всего: ${total}`, "ok");
+}
+
+// Выделяет найденный фрагмент жирным внутри текста значения.
+function highlightValue(text, matched) {
+  const frag = document.createDocumentFragment();
+  if (!matched) {
+    frag.appendChild(document.createTextNode(text));
+    return frag;
+  }
+  const idx = text.toUpperCase().indexOf(matched.toUpperCase());
+  if (idx < 0) {
+    frag.appendChild(document.createTextNode(text));
+    return frag;
+  }
+  frag.appendChild(document.createTextNode(text.slice(0, idx)));
+  const b = document.createElement("b");
+  b.textContent = text.slice(idx, idx + matched.length);
+  frag.appendChild(b);
+  frag.appendChild(document.createTextNode(text.slice(idx + matched.length)));
+  return frag;
+}
+
+// Индикация количества отмеченных пунктов на кнопке «Заменить».
+function updateReplaceLabel() {
+  if (!selectionPlan.length) {
+    replaceBtn.textContent = "Заменить";
+    return;
+  }
+  const n = selectionPlan.filter((p) => p.cb.checked).length;
+  replaceBtn.textContent = n ? `Заменить (${n})` : "Заменить";
+}
+
+// Показ найденного поля на странице (прокрутка + подсветка).
+async function onShowField(field) {
+  try {
+    await sendToTab({ type: "KF_SHOW", field });
+  } catch (_err) {
+    setStatus("Поле недоступно", "err");
+  }
+}
+
+// Замена одного конкретного пункта.
+async function onReplaceOne(resultIndex, field) {
+  const active = activeRules();
+  if (!active.length) return;
+  setStatus("Применяю...");
+  try {
+    const res = await sendToTab({
+      type: "KF_REPLACE",
+      rules: active,
+      targets: [{ rule: resultIndex, field }],
+    });
+    if (res && res.ok) {
+      setStatus(`Готово: заменено полей — ${res.changed}`, "ok");
+      await onFind();
+    } else {
+      setStatus(res && res.error ? res.error : "Не удалось применить", "err");
+    }
+  } catch (_err2) {
+    setStatus("Перезагрузи страницу и попробуй снова (нет доступа)", "err");
+  }
 }
 
 // Отправка сообщения в активную вкладку с повторным внедрением скрипта на лету.
@@ -202,6 +289,8 @@ async function onFind() {
   if (!active.length) {
     resultsEl.hidden = true;
     replaceBtn.disabled = true;
+    selectionPlan = [];
+    updateReplaceLabel();
     setStatus("Нет активных правил", "err");
     return;
   }
@@ -213,10 +302,14 @@ async function onFind() {
       renderFindResults(res.results);
     } else {
       replaceBtn.disabled = true;
+      selectionPlan = [];
+      updateReplaceLabel();
       setStatus(res && res.error ? res.error : "Не удалось найти", "err");
     }
   } catch (_err2) {
     replaceBtn.disabled = true;
+    selectionPlan = [];
+    updateReplaceLabel();
     setStatus("Перезагрузи страницу и попробуй снова (нет доступа)", "err");
   }
 }
@@ -228,9 +321,14 @@ async function onReplace() {
     return;
   }
 
+  const checked = selectionPlan.filter((p) => p.cb.checked);
+  const targets = checked.map((p) => ({ rule: p.resultIndex, field: p.field }));
+
   setStatus("Применяю...");
   try {
-    const res = await sendToTab({ type: "KF_REPLACE", rules: active });
+    const payload = { type: "KF_REPLACE", rules: active };
+    if (targets.length) payload.targets = targets;
+    const res = await sendToTab(payload);
     if (res && res.ok) {
       setStatus(`Готово: изменено полей — ${res.changed}`, "ok");
     } else {
@@ -265,6 +363,7 @@ clearBtn.addEventListener("click", async () => {
   render();
   resultsEl.hidden = true;
   replaceBtn.disabled = true;
+  updateReplaceLabel();
   setStatus("Все правила удалены");
 });
 

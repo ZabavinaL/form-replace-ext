@@ -1,8 +1,9 @@
 /**
  * Content script для массовой подмены значений в полях форм.
  * Слушает сообщения из попапа:
- *  - KF_FIND     — поиск совпадений (счёт с/без учёта регистра + найденные значения);
- *  - KF_REPLACE  — применение правил замены.
+ *  - KF_FIND    — поиск совпадений со списком найденных полей (по элементам);
+ *  - KF_REPLACE — применение правил замены (по всем полям или по переданным таргетам);
+ *  - KF_SHOW    — прокрутка и подсветка поля на странице.
  */
 
 // Поля-кандидаты: редактируемые input (без нередактируемых/служебных типов),
@@ -13,7 +14,9 @@ const SELECTOR =
   ':not([type=radio]):not([type=image]):not([type=color]):not([type=range]), ' +
   'textarea, select, [contenteditable]';
 
-const MAX_SAMPLES = 8;
+// Максимум найденных пунктов на правило, показываемых в попапе.
+const MAX_RESULTS = 50;
+const FLASH_MS = 2400;
 
 // Все поля основного документа и iframe того же домена.
 function collectFields() {
@@ -49,17 +52,53 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function setValue(el, nextValue) {
-  if (el.tagName === "SELECT") {
-    el.value = nextValue;
-  } else if (el.isContentEditable) {
-    el.innerText = nextValue;
-  } else {
-    el.value = nextValue;
+// Подгоняет регистр подстановки под регистр найденного фрагмента:
+//   "JOHN"  → "ПОЛН.",  "John" → "Иван",  "john" → "иван".
+function matchCase(found, replacement) {
+  if (!found || !replacement) return replacement;
+  if (found === found.toUpperCase() && /[A-Za-zА-ЯЁ]/.test(found)) {
+    return replacement.toUpperCase();
   }
+  const first = found.charAt(0);
+  if (/[A-ZА-ЯЁ]/.test(first)) {
+    return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
 
+function setFieldValue(el, value) {
+  if (el.tagName === "SELECT") {
+    el.value = value;
+  } else if (el.isContentEditable) {
+    el.innerText = value;
+  } else {
+    el.value = value;
+  }
+}
+
+function commitChanges(el) {
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// Замена в текстовых узлах contenteditable: сохраняет HTML-разметку
+// (списки, жирный текст, стили), трогая только текст внутри узлов.
+function replaceInContentEditable(el, re, toNext) {
+  const nodes = [];
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  let changed = false;
+  for (const node of nodes) {
+    const value = node.nodeValue;
+    if (!value) continue;
+    const next = value.replace(re, toNext);
+    if (next !== value) {
+      node.nodeValue = next;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function applyRule(el, rule) {
@@ -68,27 +107,35 @@ function applyRule(el, rule) {
   if (!find) return false;
 
   const caseSensitive = isCaseSensitive(rule);
-  const current = fieldValue(el);
-  if (current == null) return false;
-
-  let next = null;
+  const cur = fieldValue(el);
+  if (cur == null) return false;
+  const current = String(cur);
+  const toNext = (m) => matchCase(m, replace);
 
   if (rule.mode === "exact") {
-    const a = caseSensitive ? String(current) : String(current).toUpperCase();
+    const a = caseSensitive ? current : current.toUpperCase();
     const b = caseSensitive ? find : find.toUpperCase();
-    if (a === b) {
-      next = replace;
-    }
-  } else {
-    const flags = caseSensitive ? "g" : "gi";
-    const re = new RegExp(escapeRegExp(find), flags);
-    next = String(current).replace(re, replace);
+    if (a !== b) return false;
+    const next = matchCase(current, replace);
+    if (next === current) return false;
+    setFieldValue(el, next);
+    commitChanges(el);
+    return true;
   }
 
-  if (next === null || next === current) return false;
+  const flags = caseSensitive ? "g" : "gi";
+  const re = new RegExp(escapeRegExp(find), flags);
+  const changed = el.isContentEditable
+    ? replaceInContentEditable(el, re, toNext)
+    : (() => {
+        const next = current.replace(re, toNext);
+        if (next === current) return false;
+        setFieldValue(el, next);
+        return true;
+      })();
 
-  setValue(el, next);
-  return true;
+  if (changed) commitChanges(el);
+  return changed;
 }
 
 function activeRules(rules) {
@@ -98,11 +145,27 @@ function activeRules(rules) {
   );
 }
 
-function applyRules(rules) {
+// targets: [{ rule, field }] — индексы правила и поля из последнего поиска.
+function applyRules(rules, targets) {
   const enabled = activeRules(rules);
+  const fields = collectFields();
   let changed = 0;
 
-  collectFields().forEach((el) => {
+  if (Array.isArray(targets) && targets.length) {
+    const seen = new Set();
+    for (const t of targets) {
+      const rule = enabled[t.rule];
+      const el = fields[t.field];
+      if (!rule || !el) continue;
+      const key = t.rule + ":" + t.field;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (applyRule(el, rule)) changed++;
+    }
+    return changed;
+  }
+
+  fields.forEach((el) => {
     for (const rule of enabled) {
       if (applyRule(el, rule)) {
         changed++;
@@ -111,36 +174,42 @@ function applyRules(rules) {
       }
     }
   });
-
   return changed;
 }
 
-// Статистика по одному правилу: счёт с учётом и без учёта регистра, найденные значения.
+// Статистика по одному правилу: счёт, найденные поля (со значениями и фрагментами).
 function matchRule(rule) {
   const find = String(rule.find);
   const exact = rule.mode === "exact";
+  const caseSensitive = isCaseSensitive(rule);
   const findUpper = find.toUpperCase();
   let countCaseSensitive = 0;
   let countCaseInsensitive = 0;
-  const samples = [];
-  const seen = new Set();
+  const items = [];
 
-  collectFields().forEach((el) => {
+  collectFields().forEach((el, fieldIndex) => {
     const cur = fieldValue(el);
     if (cur == null) return;
     const str = String(cur);
 
-    const mCS = exact ? str === find : str.includes(find);
     const mCI = exact
       ? str.toUpperCase() === findUpper
       : str.toUpperCase().includes(findUpper);
+    if (!mCI) return;
+    countCaseInsensitive++;
 
+    const mCS = exact ? str === find : str.includes(find);
     if (mCS) countCaseSensitive++;
-    if (mCI) countCaseInsensitive++;
 
-    if ((mCS || mCI) && samples.length < MAX_SAMPLES && !seen.has(str)) {
-      seen.add(str);
-      samples.push(str);
+    if (items.length < MAX_RESULTS) {
+      let matched = str;
+      if (!exact) {
+        const idx = caseSensitive
+          ? str.indexOf(find)
+          : str.toUpperCase().indexOf(findUpper);
+        matched = idx >= 0 ? str.substr(idx, find.length) : "";
+      }
+      items.push({ field: fieldIndex, text: str, matched });
     }
   });
 
@@ -148,15 +217,26 @@ function matchRule(rule) {
     find,
     replace: String(rule.replace),
     mode: exact ? "exact" : "part",
-    caseSensitive: isCaseSensitive(rule),
+    caseSensitive,
     countCaseSensitive,
     countCaseInsensitive,
-    samples,
+    items,
   };
 }
 
 function findRules(rules) {
   return activeRules(rules).map(matchRule);
+}
+
+// Временная подсветка поля на странице.
+function flashField(el) {
+  const prev = { outline: el.style.outline, outlineOffset: el.style.outlineOffset };
+  el.style.outline = "3px solid #ff9800";
+  el.style.outlineOffset = "2px";
+  setTimeout(() => {
+    el.style.outline = prev.outline;
+    el.style.outlineOffset = prev.outlineOffset;
+  }, FLASH_MS);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -170,8 +250,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
   } else if (msg.type === "KF_REPLACE") {
     try {
-      const changed = applyRules(msg.rules);
+      const changed = applyRules(msg.rules, msg.targets);
       sendResponse({ ok: true, changed });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err) });
+    }
+  } else if (msg.type === "KF_SHOW") {
+    try {
+      const fields = collectFields();
+      const el = fields[msg.field];
+      if (el) {
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+        flashField(el);
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: false });
+      }
     } catch (err) {
       sendResponse({ ok: false, error: String(err) });
     }
