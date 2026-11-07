@@ -8,15 +8,27 @@
   <body>
     <header>
       <h1>Form Find &amp; Replace</h1>
-      <button id="addRule" class="ghost" type="button" title="Добавить правило">
-        + Правило
-      </button>
+      <div class="header-actions">
+        <div class="undo-wrap">
+          <button id="undo" class="undo" type="button" title="Отменить замену">
+            &#8634;
+          </button>
+          <div id="undoMenu" class="undo-menu" hidden>
+            <button type="button" data-undo="last">Отменить последнюю замену</button>
+            <button type="button" data-undo="all">Отменить всё</button>
+          </div>
+        </div>
+        <button id="addRule" class="ghost" type="button" title="Добавить правило">
+          + Правило
+        </button>
+      </div>
     </header>
 
     <p class="hint">
       Задай пары «найти → заменить». «Найти» покажет совпадения: отметь галочками
-      нужные и жми «Заменить», жми «Заменить» у конкретного пункта или примени всё
-      сразу. Клик по значению покажет его на странице.
+      нужные (или нажми «Выбрать все») и нажми «Заменить выбранные», либо «Заменить
+      все» сразу, либо заменяй конкретный пункт его кнопкой. Клик по значению
+      покажет его на странице.
     </p>
 
     <div id="rules" class="rules"></div>
@@ -30,7 +42,10 @@
     <footer>
       <button id="find" class="primary" type="button">Найти</button>
       <button id="replace" class="secondary" type="button" disabled>
-        Заменить
+        Заменить выбранные
+      </button>
+      <button id="replaceAll" class="secondary" type="button" disabled>
+        Заменить все
       </button>
       <button id="clear" class="ghost" type="button">Очистить все</button>
     </footer>

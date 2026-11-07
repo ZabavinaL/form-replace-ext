@@ -17,6 +17,10 @@ const SELECTOR =
 // Максимум найденных пунктов на правило, показываемых в попапе.
 const MAX_RESULTS = 50;
 const FLASH_MS = 2400;
+const MAX_UNDO = 100;
+
+// Стек отмены: плоский список снимков изменённых полей в порядке применения.
+let undoStack = []; // [{ el, kind: "ce"|"value", prev }]
 
 // Все поля основного документа и iframe того же домена.
 function collectFields() {
@@ -101,6 +105,44 @@ function replaceInContentEditable(el, re, toNext) {
   return changed;
 }
 
+// Строки списков (ol/ul) внутри contenteditable в порядке документа.
+function listRows(el) {
+  return Array.from(el.querySelectorAll("li"));
+}
+
+// Применить правило к одной строке списка.
+function applyRow(rowEl, rule) {
+  const find = String(rule.find);
+  const replace = String(rule.replace);
+  const caseSensitive = isCaseSensitive(rule);
+  const current = String(rowEl.textContent || "");
+
+  if (rule.mode === "exact") {
+    const a = caseSensitive ? current : current.toUpperCase();
+    const b = caseSensitive ? find : find.toUpperCase();
+    if (a !== b) return false;
+    rowEl.textContent = matchCase(current, replace);
+    return true;
+  }
+
+  const flags = caseSensitive ? "g" : "gi";
+  const re = new RegExp(escapeRegExp(find), flags);
+  return replaceInContentEditable(rowEl, re, (m) => matchCase(m, replace));
+}
+
+// Применить правило к выбранным строкам списка (rowIndexes — индексы listRows).
+function applyListRows(el, rule, rowIndexes) {
+  const rows = listRows(el);
+  let changed = false;
+  for (const idx of rowIndexes) {
+    const row = rows[idx];
+    if (!row) continue;
+    changed = applyRow(row, rule) || changed;
+  }
+  if (changed) commitChanges(el);
+  return changed;
+}
+
 function applyRule(el, rule) {
   const find = String(rule.find);
   const replace = String(rule.replace);
@@ -145,11 +187,30 @@ function activeRules(rules) {
   );
 }
 
+// Снимок состояния поля до изменения (для отмены последнего действия).
+// Для contenteditable сохраняем innerHTML, чтобы вернуть и разметку.
+function captureField(el) {
+  return el.isContentEditable
+    ? { el, kind: "ce", prev: el.innerHTML }
+    : { el, kind: "value", prev: el.value };
+}
+
 // targets: [{ rule, field }] — индексы правила и поля из последнего поиска.
 function applyRules(rules, targets) {
   const enabled = activeRules(rules);
   const fields = collectFields();
+  const changedNow = [];
   let changed = 0;
+
+  const applyOne = (el, rule) => {
+    const snap = captureField(el);
+    const ok = applyRule(el, rule);
+    if (ok) {
+      changedNow.push(snap);
+      changed++;
+    }
+    return ok;
+  };
 
   if (Array.isArray(targets) && targets.length) {
     const seen = new Set();
@@ -160,21 +221,64 @@ function applyRules(rules, targets) {
       const key = t.rule + ":" + t.field;
       if (seen.has(key)) continue;
       seen.add(key);
-      if (applyRule(el, rule)) changed++;
-    }
-    return changed;
-  }
-
-  fields.forEach((el) => {
-    for (const rule of enabled) {
-      if (applyRule(el, rule)) {
-        changed++;
-        // Поле уже изменено первым подходящим правилом — к следующему полю.
-        break;
+      if (Array.isArray(t.rows) && t.rows.length && el.isContentEditable) {
+        const snap = captureField(el);
+        const ok = applyListRows(el, rule, t.rows);
+        if (ok) {
+          changedNow.push(snap);
+          changed++;
+        }
+      } else {
+        applyOne(el, rule);
       }
     }
-  });
+  } else {
+    fields.forEach((el) => {
+      for (const rule of enabled) {
+        if (applyOne(el, rule)) {
+          // Поле уже изменено первым подходящим правилом — к следующему полю.
+          break;
+        }
+      }
+    });
+  }
+
+  if (changedNow.length) {
+    undoStack.push(...changedNow);
+    if (undoStack.length > MAX_UNDO) {
+      undoStack.splice(0, undoStack.length - MAX_UNDO);
+    }
+  }
   return changed;
+}
+
+// Вернуть одно поле к сохранённому состоянию.
+function undoField(rec) {
+  const el = rec.el;
+  if (!el || !el.isConnected) return false;
+  if (rec.kind === "ce") el.innerHTML = rec.prev;
+  else el.value = rec.prev;
+  commitChanges(el);
+  return true;
+}
+
+// Отменить последнюю замену одного слова/фразы (последний изменённый пункт).
+function undoLastRecs() {
+  while (undoStack.length) {
+    const rec = undoStack.pop();
+    if (undoField(rec)) return [rec];
+  }
+  return [];
+}
+
+// Отменить все внесённые замены.
+function undoAllRecs() {
+  const out = [];
+  while (undoStack.length) {
+    const rec = undoStack.pop();
+    if (undoField(rec)) out.push(rec);
+  }
+  return out;
 }
 
 // Статистика по одному правилу: счёт, найденные поля (со значениями и фрагментами).
@@ -201,6 +305,21 @@ function matchRule(rule) {
     const mCS = exact ? str === find : str.includes(find);
     if (mCS) countCaseSensitive++;
 
+    // Если в contenteditable есть список (ol/ul) и значение найдено минимум
+    // в двух строках — собрать их в один «групповой» пункт.
+    let groupRows = null;
+    if (!exact && el.isContentEditable) {
+      const rows = listRows(el);
+      const matching = [];
+      rows.forEach((li, row) => {
+        const txt = String(li.textContent || "");
+        if (txt.toUpperCase().includes(findUpper)) {
+          matching.push({ row, text: txt });
+        }
+      });
+      if (matching.length >= 2) groupRows = matching;
+    }
+
     if (items.length < MAX_RESULTS) {
       let matched = str;
       if (!exact) {
@@ -209,7 +328,22 @@ function matchRule(rule) {
           : str.toUpperCase().indexOf(findUpper);
         matched = idx >= 0 ? str.substr(idx, find.length) : "";
       }
-      items.push({ field: fieldIndex, text: str, matched });
+      if (groupRows) {
+        items.push({
+          field: fieldIndex,
+          group: true,
+          rows: groupRows.map((r) => {
+            let f = "";
+            const i = caseSensitive
+              ? r.text.indexOf(find)
+              : r.text.toUpperCase().indexOf(findUpper);
+            if (i >= 0) f = r.text.substr(i, find.length);
+            return { row: r.row, text: r.text, matched: f };
+          }),
+        });
+      } else {
+        items.push({ field: fieldIndex, text: str, matched });
+      }
     }
   });
 
@@ -242,7 +376,7 @@ function flashField(el) {
 // ---- Подсветка найденных слов на странице (жёлтый фон) ----
 
 const MARK_ATTR = "data-kf-mark";
-const MARK_BG = "#fff59d";
+const MARK_BG = "#ffcf8f";
 let markSpans = [];
 let markControls = [];
 
@@ -352,6 +486,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       clearMarks();
       const changed = applyRules(msg.rules, msg.targets);
       sendResponse({ ok: true, changed });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err) });
+    }
+  } else if (msg.type === "KF_UNDO") {
+    try {
+      clearMarks();
+      const recs = msg.undoAll ? undoAllRecs() : undoLastRecs();
+      const map = new Map();
+      collectFields().forEach((el, i) => map.set(el, i));
+      const fields = recs
+        .map(({ el }) => map.get(el))
+        .filter((i) => i != null);
+      sendResponse({ ok: true, changed: fields.length, fields });
     } catch (err) {
       sendResponse({ ok: false, error: String(err) });
     }
